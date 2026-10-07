@@ -44,6 +44,7 @@ __all__ = ["register"]
 
 _gateway = None
 _ctx = None
+_last = {}   # last decision (for /effort status)
 
 # ---------------------------------------------------------------------------
 # Fallback vocabulary mirroring agent/reasoning_effort.py (import wins when
@@ -60,6 +61,9 @@ DEFAULT_SETTINGS = {
     "endpoint": "http://127.0.0.1:11434/v1/systemone",
     "decider_model": "tev1:0.8b",
     "enabled": True,
+    "mode": "auto",            # "auto" = decider per turn; "manual" = pinned level
+    "manual_effort": "",       # level used while mode == "manual" ("" = fall back to auto)
+    "notify_changes": True,    # emit a status line on Telegram/TUI when effort changes
     "up_gate": 0.45,      # top-prob needed to raise effort
     "down_gate": 0.60,    # top-prob needed to lower effort
     "timeout_s": 8.0,     # must cover cold model load (~3s) plus warm decision
@@ -135,8 +139,11 @@ def _supported_efforts(provider, model, api_mode):
 
 
 def _resolve_agent(session_id, model):
+    """Return ``(agent, cache_key)``; ``cache_key`` is the gateway agent-cache
+    key when resolved via the gateway (used to check per-session manual overrides)."""
     # gateway path (mirrors max-output-budget)
     agent = None
+    cache_key = None
     try:
         cache = getattr(_gateway, "_agent_cache", None)
         if isinstance(cache, dict) and session_id:
@@ -144,20 +151,21 @@ def _resolve_agent(session_id, model):
                 a = entry[0] if isinstance(entry, tuple) and entry else entry
                 if getattr(a, "session_id", None) == session_id:
                     agent = a
+                    cache_key = _key
                     break
     except Exception:
         agent = None
     if agent is not None:
-        return agent
+        return agent, cache_key
     # CLI / TUI path
     try:
         cli_ref = getattr(getattr(_ctx, "_manager", None), "_cli_ref", None)
         a = getattr(cli_ref, "agent", None)
         if a is not None and (not session_id or getattr(a, "session_id", None) == session_id):
-            return a
+            return a, None
     except Exception:
         pass
-    return None
+    return None, None
 
 
 def _decide(state, choices, timeout_s):
@@ -227,6 +235,8 @@ def _build_state(user_message, conversation_history):
 
 
 def _log_decision(entry):
+    global _last
+    _last = dict(entry)
     try:
         logger.info("dynamic-effort decision: %s", json.dumps(entry, sort_keys=True))
         from hermes_constants import get_hermes_home
@@ -251,12 +261,41 @@ def _on_pre_llm_call(session_id=None, user_message=None, conversation_history=No
         um = str(user_message or "")
         if len(um.strip()) < settings["min_message_chars"]:
             return None
-        agent = _resolve_agent(session_id, model)
+        agent, cache_key = _resolve_agent(session_id, model)
         if agent is None:
             return None
+        rc = getattr(agent, "reasoning_config", None)
+
+        # A built-in /reasoning session override wins over the decider.
+        try:
+            ovr = getattr(_gateway, "_session_reasoning_overrides", None) or {}
+            if isinstance(ovr, dict) and cache_key and cache_key in ovr and ovr.get(cache_key):
+                _log_decision({
+                    "event": "manual_override_respected", "session": session_id,
+                    "model": getattr(agent, "model", model),
+                })
+                return None
+        except Exception:
+            pass
+
+        # Manual mode (`/effort level <X>`): pin the requested level every turn.
+        if settings["mode"] == "manual" and settings.get("manual_effort"):
+            level = str(settings["manual_effort"]).strip().lower()
+            if level:
+                new_rc = dict(rc) if isinstance(rc, dict) else {}
+                new_rc["enabled"] = True
+                new_rc["effort"] = level
+                agent.reasoning_config = new_rc
+                _log_decision({
+                    "event": "manual_applied", "session": session_id,
+                    "model": getattr(agent, "model", model),
+                    "provider": getattr(agent, "provider", None),
+                    "manual_effort": level,
+                })
+                return None
+
         # Never override an explicit disable; never touch unset reasoning when
         # the configured default would not exist (unset stays unset).
-        rc = getattr(agent, "reasoning_config", None)
         if isinstance(rc, dict) and rc.get("enabled") is False:
             return None
         choices = _supported_efforts(getattr(agent, "provider", None),
@@ -299,6 +338,13 @@ def _on_pre_llm_call(session_id=None, user_message=None, conversation_history=No
             "current": current, "recommended": recommended, "top_prob": round(top, 3),
             "gate": gate, "choices": list(choices), "ms": round((time.time() - t0) * 1000),
         })
+        if settings.get("notify_changes"):
+            try:
+                emit = getattr(agent, "_emit_status", None)
+                if callable(emit):
+                    emit(f"⚙️ reasoning effort: {current} → {recommended}")
+            except Exception:
+                pass
     except Exception:
         logger.warning("dynamic-effort: non-blocking failure", exc_info=True)
     return None
@@ -309,6 +355,73 @@ def _capture_gateway(event=None, gateway=None, **kwargs):
     if gateway is not None:
         _gateway = gateway
     return None
+
+
+_LADDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _fmt_last():
+    if not _last:
+        return "none yet"
+    e = _last
+    target = e.get("recommended") or e.get("manual_effort") or e.get("current") or "-"
+    return (f"{e.get('event', '?')} · {e.get('model', '?')} · "
+            f"{e.get('current', '')} → {target} "
+            f"(prob {e.get('top_prob', '-')}, {e.get('ms', '-')}ms)")
+
+
+def _cmd_effort(raw_args):
+    """/effort [status|on|off|auto|level <X>|gate up/down <f>|last] — control
+    dynamic reasoning effort from the chat (Telegram/TUI/CLI)."""
+    args = (raw_args or "").strip().split()
+    cmd = args[0].lower() if args else "status"
+    s = _settings()
+    if cmd == "on":
+        if _ctx is not None:
+            _ctx.set_config("enabled", True)
+        return "⚙️ Dynamic effort: ON. Local decider picks the level each turn."
+    if cmd == "off":
+        if _ctx is not None:
+            _ctx.set_config("enabled", False)
+        return "⚙️ Dynamic effort: OFF. Effort stays at your configured level."
+    if cmd == "auto":
+        if _ctx is not None:
+            _ctx.set_config("mode", "auto")
+            _ctx.set_config("manual_effort", "")
+        return "⚙️ Effort mode: AUTO — decider controls the level each turn."
+    if cmd in ("level", "set"):
+        if len(args) < 2:
+            return "Usage: /effort level low|medium|high|xhigh|max|minimal|none|ultra"
+        lvl = args[1].lower()
+        if lvl not in _LADDER:
+            return f"Unknown level '{lvl}'. One of: {' '.join(_LADDER)}"
+        if _ctx is not None:
+            _ctx.set_config("mode", "manual")
+            _ctx.set_config("manual_effort", lvl)
+        return f"⚙️ Effort pinned to {lvl}. Send /effort auto to release."
+    if cmd == "gate":
+        if len(args) < 3 or args[1] not in ("up", "down"):
+            return "Usage: /effort gate up|down <0.0-1.0>"
+        try:
+            val = round(float(args[2]), 3)
+        except ValueError:
+            return "Gate must be a number between 0 and 1."
+        if not 0 <= val <= 1:
+            return "Gate must be between 0 and 1."
+        key = "up_gate" if args[1] == "up" else "down_gate"
+        if _ctx is not None:
+            _ctx.set_config(key, val)
+        return f"⚙️ {key} = {val}."
+    if cmd in ("last", "log"):
+        return f"⚙️ Last decision: {_fmt_last()}"
+    # status (default)
+    mode = s.get("mode", "auto")
+    extra = f", manual={s.get('manual_effort')!r}" if mode == "manual" else ""
+    return (
+        f"⚙️ Dynamic effort: {'ON' if s.get('enabled') else 'OFF'} · mode={mode}{extra}\n"
+        f"gates: up≥{s.get('up_gate')} down≥{s.get('down_gate')} · decider={s.get('decider_model')}\n"
+        f"last: {_fmt_last()}"
+    )
 
 
 def register(ctx):
@@ -322,3 +435,10 @@ def register(ctx):
         ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     except Exception:
         logger.warning("dynamic-effort: pre_llm_call registration failed", exc_info=True)
+    try:
+        ctx.register_command(
+            "effort", handler=_cmd_effort,
+            description="Control dynamic reasoning effort (status/on/off/auto/level/gate/last).",
+        )
+    except Exception:
+        logger.warning("dynamic-effort: /effort command registration failed", exc_info=True)
