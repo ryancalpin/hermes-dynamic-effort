@@ -14,10 +14,10 @@ description: >
   any error leaves the turn untouched at its configured effort. Never enables
   reasoning when the user has disabled it. Full behavior and settings in
   __init__.py docstring.
-author: Ryan Calpin, Hermes Agent
+author: Ryan Calpin (ryancalpin), Hermes Agent
 license: MIT
 homepage: https://github.com/ryancalpin/hermes-dynamic-effort
-requires_hermes: ">=0.21.0"
+requires_hermes: ">=0.21.5"
 provides_tools: []
 provides_hooks:
   - pre_gateway_dispatch
