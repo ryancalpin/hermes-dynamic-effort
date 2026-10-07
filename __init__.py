@@ -379,26 +379,26 @@ def _cmd_effort(raw_args):
     if cmd == "on":
         if _ctx is not None:
             _ctx.set_config("enabled", True)
-        return "⚙️ Dynamic effort: ON. Local decider picks the level each turn."
+        return "⚙️ Dynamic effort is now *ON*. The local decider picks the level each turn. Send */effort status* anytime."
     if cmd == "off":
         if _ctx is not None:
             _ctx.set_config("enabled", False)
-        return "⚙️ Dynamic effort: OFF. Effort stays at your configured level."
+        return "⚙️ Dynamic effort is now *OFF*. Effort stays at your configured level. */effort on* re-enables it."
     if cmd == "auto":
         if _ctx is not None:
             _ctx.set_config("mode", "auto")
             _ctx.set_config("manual_effort", "")
-        return "⚙️ Effort mode: AUTO — decider controls the level each turn."
+        return "⚙️ Back to *auto* — the decider controls the level each turn."
     if cmd in ("level", "set"):
         if len(args) < 2:
             return "Usage: /effort level low|medium|high|xhigh|max|minimal|none|ultra"
         lvl = args[1].lower()
         if lvl not in _LADDER:
-            return f"Unknown level '{lvl}'. One of: {' '.join(_LADDER)}"
+            return f"❓ Unknown level '{lvl}'. Choose: {' / '.join(_LADDER)}"
         if _ctx is not None:
             _ctx.set_config("mode", "manual")
             _ctx.set_config("manual_effort", lvl)
-        return f"⚙️ Effort pinned to {lvl}. Send /effort auto to release."
+        return f"📌 Effort pinned to *{lvl}* for every turn. Send */effort auto* to release."
     if cmd == "gate":
         if len(args) < 3 or args[1] not in ("up", "down"):
             return "Usage: /effort gate up|down <0.0-1.0>"
@@ -411,16 +411,22 @@ def _cmd_effort(raw_args):
         key = "up_gate" if args[1] == "up" else "down_gate"
         if _ctx is not None:
             _ctx.set_config(key, val)
-        return f"⚙️ {key} = {val}."
+        return f"🎚️ {'Up' if key == 'up_gate' else 'Down'} gate = *{val}*."
     if cmd in ("last", "log"):
         return f"⚙️ Last decision: {_fmt_last()}"
     # status (default)
-    mode = s.get("mode", "auto")
-    extra = f", manual={s.get('manual_effort')!r}" if mode == "manual" else ""
+    on = bool(s.get("enabled"))
+    if not on:
+        head = "Dynamic effort: *OFF* · stays at your configured level"
+    elif s.get("mode") == "manual" and s.get("manual_effort"):
+        head = f"Dynamic effort: *ON* · pinned to *{s.get('manual_effort')}*"
+    else:
+        head = "Dynamic effort: *ON* · auto mode"
     return (
-        f"⚙️ Dynamic effort: {'ON' if s.get('enabled') else 'OFF'} · mode={mode}{extra}\n"
-        f"gates: up≥{s.get('up_gate')} down≥{s.get('down_gate')} · decider={s.get('decider_model')}\n"
-        f"last: {_fmt_last()}"
+        f"⚙️ {head}\n"
+        f"Gates: up ≥ {s.get('up_gate')} · down ≥ {s.get('down_gate')}\n"
+        f"Decider: {s.get('decider_model')}\n\n"
+        f"_Last decision:_ {_fmt_last()}"
     )
 
 
