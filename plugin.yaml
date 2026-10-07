@@ -1,7 +1,7 @@
 name: dynamic-effort
 label: Dynamic Reasoning Effort
 kind: standalone
-version: 1.0.0
+version: 1.3.0
 description: >
   Locally decides the reasoning effort for each turn using a small decision
   model (tev1:0.8b via Ollama /v1/systemone, TypeSafe Jev-style API) and
@@ -14,8 +14,70 @@ description: >
   any error leaves the turn untouched at its configured effort. Never enables
   reasoning when the user has disabled it. Full behavior and settings in
   __init__.py docstring.
-author: Ops
+author: Ryan Calpin, Hermes Agent
 license: MIT
+homepage: https://github.com/ryancalpin/hermes-dynamic-effort
+requires_hermes: ">=0.21.0"
 provides_tools: []
+provides_hooks:
+  - pre_gateway_dispatch
+  - pre_llm_call
 requires_env: []
 optional_env: []
+config_schema:
+  endpoint:
+    type: str
+    default: "http://127.0.0.1:11434/v1/systemone"
+    description: Local decision-model HTTP endpoint (Ollama /v1/systemone).
+  decider_model:
+    type: str
+    default: "tev1:0.8b"
+    description: Decision model name served by the endpoint.
+  enabled:
+    type: bool
+    default: true
+    description: Master switch; false leaves every turn at the configured effort.
+  mode:
+    type: str
+    default: "auto"
+    description: "auto = decider per turn; manual = pinned level."
+  manual_effort:
+    type: str
+    default: ""
+    description: Level used while mode is manual ("" falls back to auto).
+  notify_changes:
+    type: bool
+    default: true
+    description: Emit a status line when the effort level changes.
+  up_gate:
+    type: float
+    default: 0.45
+    description: Top-probability needed to raise effort.
+  down_gate:
+    type: float
+    default: 0.60
+    description: Top-probability needed to lower effort.
+  timeout_s:
+    type: float
+    default: 8.0
+    description: Max seconds for a decision call (must cover cold model load).
+  max_state_chars:
+    type: int
+    default: 1500
+    description: Cap on the decision-state text sent to the decider.
+  skip_platforms:
+    type: list
+    default: []
+    description: Platform names to skip (e.g. ["cron"]).
+  allow_none:
+    type: bool
+    default: false
+    description: Allow the decider to pick "none" (hard-disable reasoning).
+  default_effort:
+    type: str
+    default: "medium"
+    description: Effort used when the session has none configured.
+  min_message_chars:
+    type: int
+    default: 4
+    description: Skip decisions for messages shorter than this.

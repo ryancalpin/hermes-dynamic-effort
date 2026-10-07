@@ -244,8 +244,29 @@ def _log_decision(entry):
         log_dir.mkdir(parents=True, exist_ok=True)
         with open(log_dir / "decisions.jsonl", "a") as f:
             f.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception as exc:
+        logger.warning("dynamic-effort: decision log write failed (non-blocking): %s", exc)
+
+
+def _last_from_log():
+    """Most recent decision from decisions.jsonl (survives process restarts)."""
+    try:
+        from hermes_constants import get_hermes_home
+        log_file = get_hermes_home() / "plugin-data" / "dynamic-effort" / "decisions.jsonl"
+        if not log_file.exists():
+            return None
+        with open(log_file, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            if size == 0:
+                return None
+            f.seek(max(0, size - 4096))
+            tail = f.read().decode("utf-8", "replace").strip().splitlines()
+        if not tail:
+            return None
+        return json.loads(tail[-1])
     except Exception:
-        pass
+        return None
 
 
 def _on_pre_llm_call(session_id=None, user_message=None, conversation_history=None,
@@ -413,7 +434,13 @@ def _cmd_effort(raw_args):
             _ctx.set_config(key, val)
         return f"🎚️ {'Up' if key == 'up_gate' else 'Down'} gate = *{val}*."
     if cmd in ("last", "log"):
-        return f"⚙️ Last decision: {_fmt_last()}"
+            entry = _last_from_log() or _last
+            if not entry:
+                return "⚙️ Last decision: none yet"
+            target = entry.get("recommended") or entry.get("manual_effort") or entry.get("current") or "-"
+            return (f"⚙️ Last decision: *{entry.get('event', '?')}* · {entry.get('model', '?')} · "
+                    f"{entry.get('current', '')} → {target} "
+                    f"(prob {entry.get('top_prob', '-')}, {entry.get('ms', '-')}ms)")
     # status (default)
     on = bool(s.get("enabled"))
     if not on:
