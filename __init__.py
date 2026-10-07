@@ -58,11 +58,11 @@ _FALLBACK = {
 
 DEFAULT_SETTINGS = {
     "endpoint": "http://127.0.0.1:11434/v1/systemone",
-    "model": "tev1:0.8b",
+    "decider_model": "tev1:0.8b",
     "enabled": True,
     "up_gate": 0.45,      # top-prob needed to raise effort
     "down_gate": 0.60,    # top-prob needed to lower effort
-    "timeout_s": 2.0,
+    "timeout_s": 8.0,     # must cover cold model load (~3s) plus warm decision
     "max_state_chars": 1500,
     "skip_platforms": [],     # e.g. ["cron"]
     "allow_none": False,
@@ -163,8 +163,9 @@ def _resolve_agent(session_id, model):
 def _decide(state, choices, timeout_s):
     settings = _settings()
     payload = {
-        "model": settings["model"],
+        "model": settings["decider_model"],
         "state": state,
+        "keep_alive": "30m",   # refresh residency: decisions keep the model warm
         "questions": {
             "effort": {
                 "type": "choice",
