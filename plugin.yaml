@@ -1,0 +1,21 @@
+name: dynamic-effort
+label: Dynamic Reasoning Effort
+kind: standalone
+version: 1.0.0
+description: >
+  Locally decides the reasoning effort for each turn using a small decision
+  model (tev1:0.8b via Ollama /v1/systemone, TypeSafe Jev-style API) and
+  applies it to the live agent before the main LLM call. The option list is
+  derived from the efforts the active provider/model actually supports
+  (deepseek -> low/medium/high/max, kimi k3 -> low/high/max, etc., per
+  agent/reasoning_effort.py), so the decider never proposes a level the
+  provider rejects. Applies a change only when the top probability clears a
+  per-direction threshold (up-shift less strict than down-shift). Fail-open:
+  any error leaves the turn untouched at its configured effort. Never enables
+  reasoning when the user has disabled it. Full behavior and settings in
+  __init__.py docstring.
+author: Ops
+license: MIT
+provides_tools: []
+requires_env: []
+optional_env: []
