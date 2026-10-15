@@ -37,6 +37,7 @@ import json
 import logging
 import time
 import urllib.request
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,35 @@ __all__ = ["register"]
 _gateway = None
 _ctx = None
 _last = {}   # last decision (for /effort status)
+_fail_streak = 0        # consecutive decider failures
+_cooldown_until = 0.0   # monotonic-ish epoch seconds; decisions skipped until then
+
+
+def _breaker_open():
+    return time.time() < _cooldown_until
+
+
+def _record_failure(settings, exc, ms):
+    """Count a decider failure; open the breaker once the streak is long enough."""
+    global _fail_streak, _cooldown_until
+    _fail_streak += 1
+    opened = _fail_streak >= int(settings.get("fail_cooldown_after", 2))
+    if opened:
+        _cooldown_until = time.time() + float(settings.get("fail_cooldown_s", 300.0))
+    _log_decision({
+        "event": "decider_cooldown_open" if opened else "decider_failed",
+        "streak": _fail_streak,
+        "error": f"{type(exc).__name__}: {exc}",
+        "timeout_s": settings.get("timeout_s"),
+        "cooldown_s": settings.get("fail_cooldown_s") if opened else None,
+        "ms": ms,
+    })
+
+
+def _record_success():
+    global _fail_streak, _cooldown_until
+    _fail_streak = 0
+    _cooldown_until = 0.0
 
 # ---------------------------------------------------------------------------
 # Fallback vocabulary mirroring agent/reasoning_effort.py (import wins when
@@ -65,8 +95,21 @@ DEFAULT_SETTINGS = {
     "manual_effort": "",       # level used while mode == "manual" ("" = fall back to auto)
     "notify_changes": True,    # emit a status line on Telegram/TUI when effort changes
     "up_gate": 0.45,      # top-prob needed to raise effort
-    "down_gate": 0.60,    # top-prob needed to lower effort
-    "timeout_s": 8.0,     # must cover cold model load (~3s) plus warm decision
+    # Down-shifts stay stricter than up-shifts (a wrong down costs quality),
+    # but 0.60 was stricter than the decider's calibration: over 34 logged
+    # decisions it blocked 12 of 15 down proposals (median down prob ~0.52),
+    # so effort effectively never came back down. 0.50 keeps the asymmetry
+    # while letting a clear "this turn is simple" vote through.
+    "down_gate": 0.50,    # top-prob needed to lower effort
+    # Measured on this box (6 GB GPU, one resident model at a time): a warm
+    # decision is ~6.5s and a cold one — the model was evicted by another
+    # Ollama client — reached 15.4s. The old 8s budget silently dropped
+    # every cold decision. 20s covers the measured cold load; the circuit
+    # breaker below stops a thrashing box from paying it on every turn.
+    "timeout_s": 20.0,
+    # Consecutive decider failures before decisions are skipped for a while.
+    "fail_cooldown_after": 2,
+    "fail_cooldown_s": 300.0,
     "max_state_chars": 1500,
     "skip_platforms": [],     # e.g. ["cron"]
     "allow_none": False,
@@ -236,6 +279,11 @@ def _build_state(user_message, conversation_history):
 
 def _log_decision(entry):
     global _last
+    # Stamp every entry: without it a decision can only be placed in time by
+    # guessing from the session id / file mtime, which makes the log useless
+    # for calibration and for answering "when did that change?".
+    if "ts" not in entry:
+        entry = {**entry, "ts": datetime.now().astimezone().isoformat(timespec="seconds")}
     _last = dict(entry)
     try:
         logger.info("dynamic-effort decision: %s", json.dumps(entry, sort_keys=True))
@@ -331,8 +379,18 @@ def _on_pre_llm_call(session_id=None, user_message=None, conversation_history=No
             current = settings["default_effort"]
         if current not in choices:
             return None  # manual/session effort outside our ladder: respect it
+        # Circuit breaker: a decider that is timing out (cold model load on a
+        # busy GPU) would otherwise burn the full timeout on every turn for no
+        # benefit. Skip quietly until the cooldown expires.
+        if _breaker_open():
+            return None
         state = _build_state(um, conversation_history)
-        recommended, probs = _decide(state, choices, settings["timeout_s"])
+        try:
+            recommended, probs = _decide(state, choices, settings["timeout_s"])
+        except Exception as exc:
+            _record_failure(settings, exc, round((time.time() - t0) * 1000))
+            return None
+        _record_success()
         if recommended not in choices or recommended == current:
             return None
         top = float(probs.get(recommended, 0.0) or 0.0)

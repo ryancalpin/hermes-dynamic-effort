@@ -1,7 +1,7 @@
 name: dynamic-effort
 label: Dynamic Reasoning Effort
 kind: standalone
-version: 1.3.0
+version: 1.4.0
 description: >
   Locally decides the reasoning effort for each turn using a small decision
   model (tev1:0.8b via Ollama /v1/systemone, TypeSafe Jev-style API) and
@@ -55,12 +55,25 @@ config_schema:
     description: Top-probability needed to raise effort.
   down_gate:
     type: float
-    default: 0.60
-    description: Top-probability needed to lower effort.
+    default: 0.50
+    description: "Top-probability needed to lower effort. Stricter than up_gate (a wrong
+      down-shift costs quality), but no longer so strict that effort never comes back
+      down: at 0.60, 12 of the 15 observed down proposals were blocked."
   timeout_s:
     type: float
-    default: 8.0
-    description: Max seconds for a decision call (must cover cold model load).
+    default: 20.0
+    description: "Max seconds for a decision call. Must cover a cold model load:
+      measured 6.5s warm and 15.4s cold on this box (one resident Ollama model,
+      6GB GPU), so the old 8s budget dropped every cold decision."
+  fail_cooldown_after:
+    type: int
+    default: 2
+    description: "Consecutive decider failures before decisions are paused."
+  fail_cooldown_s:
+    type: float
+    default: 300.0
+    description: "How long to pause decisions after the failure streak trips, so a
+      thrashing box does not pay the timeout on every turn."
   max_state_chars:
     type: int
     default: 1500
